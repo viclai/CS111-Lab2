@@ -34,7 +34,7 @@
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("CS 111 RAM Disk");
 // EXERCISE: Pass your names into the kernel as the module's authors.
-MODULE_AUTHOR("Skeletor");
+MODULE_AUTHOR("Gloria Chan & Victor Lai");
 
 #define OSPRD_MAJOR	222
 
@@ -120,8 +120,32 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// Consider the 'req->sector', 'req->current_nr_sectors', and
 	// 'req->buffer' members, and the rq_data_dir() function.
 
+
 	// Your code here.
-	eprintk("Should process request...\n");
+	uint8_t* dPtr;
+	/* Get pointer to data on disk requested by the user.
+	 * req->sector: sector specified by the user to read/write to.
+	 * (req->sector * SECTOR_SIZE): offset */
+	dPtr = d->data + ((req->sector) * SECTOR_SIZE);
+	unsigned int reqType;
+        /* Determine whether the request is a read or a write.
+         * READ: 0, WRITE: 1 (defined in <linux/fs.h>) */
+	reqType = rq_data_dir(req);
+	/* req->current_nr_sectors: number of sectors to rea/write to. */
+	if (reqType == READ) {
+		/* Copy contents of data buffer into request's buffer. */
+		unsigned long ret = copy_to_user ((void*) req->buffer, 
+			(void*) dPtr, req->current_nr_sectors * SECTOR_SIZE);
+		// FIXME: Return error somehow if ret != 0
+	}
+	else { // reqType == WRITE
+		/* Copy contents of request's buffer into data buffer. */
+		unsigned long ret = copy_from_user ((void*) dPtr, 
+			(void*) req->buffer, 
+			req->current_nr_sectors * SECTOR_SIZE);
+		// FIXME: Return error somehow if ret != 0
+	}
+	//eprintk("Should process request...\n");
 
 	end_request(req, 1);
 }
