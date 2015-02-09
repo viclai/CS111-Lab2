@@ -44,26 +44,53 @@ MODULE_AUTHOR("Gloria Chan & Victor Lai");
 static int nsectors = 32;
 module_param(nsectors, int, 0);
 
+struct pidNode {
+	pid_t pid;
+	struct pidNode* next;
+};
+
+struct pidList {
+	struct pidNode* head;
+	unsigned size;
+};
+
+struct ticketNode {
+	unsigned ticket;
+	struct ticketNode* next;
+};
+
+struct ticketList {
+	struct ticketNode* head;
+	unsigned size;
+};
 
 /* The internal representation of our device. */
 typedef struct osprd_info {
-	uint8_t *data;                  // The data array. Its size is
-	                                // (nsectors * SECTOR_SIZE) bytes.
+	uint8_t *data;                   // The data array. Its size is
+	                                 // (nsectors * SECTOR_SIZE) bytes.
 
-	osp_spinlock_t mutex;           // Mutex for synchronizing access to
-					// this block device
+	osp_spinlock_t mutex;            // Mutex for synchronizing access to
+					 // this block device
 
-	unsigned ticket_head;		// Currently running ticket for
-					// the device lock
+	unsigned ticket_head;		 // Currently running ticket for
+					 // the device lock
 
-	unsigned ticket_tail;		// Next available ticket for
-					// the device lock
+	unsigned ticket_tail;		 // Next available ticket for
+					 // the device lock
 
-	wait_queue_head_t blockq;       // Wait queue for tasks blocked on
-					// the device lock
+	wait_queue_head_t blockq;        // Wait queue for tasks blocked on
+					 // the device lock
 
 	/* HINT: You may want to add additional fields to help
 	         in detecting deadlock. */
+	struct pidList* readLockingPids; // Maintain a list of processes that hold
+					 // a read lock
+
+	struct pidList* writeLockingPids;// Maintain a list of processes that hold
+					 // a write lock
+
+	struct ticketList* exitedTickets;// Maintain a list of tickets that have 
+					 // exited
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -78,6 +105,158 @@ static osprd_info_t osprds[NOSPRD];
 
 
 // Declare useful helper functions
+
+/* Precondition: l is the pidList specified to add the pid value p to. */
+void addToPidList(struct pidList** l, pid_t p)
+{
+	struct pidNode* newNode;
+	/* Just add a pid node if the list is empty. */
+	if (*l == NULL) {
+		/* kzalloc: allocates kernel memory and zeroes out the allocated
+		 * memory (defined in <linux/slab.h>). */
+		*l = kzalloc(sizeof(struct pidList), GFP_ATOMIC);
+		(*l)->head = NULL;
+		(*l)->size = 0;
+	}
+	newNode = kzalloc(sizeof(struct pidNode), GFP_ATOMIC);
+	newNode->pid = p;
+	/* Head of list always points to the new pid node. */
+	if ((*l)->head == NULL) {
+		(*l)->head = newNode;
+		newNode->next = NULL;
+	}
+	else {
+		newNode->next = (*l)->head;
+		(*l)->head = newNode;
+	}
+	(*l)->size = (*l)->size + 1;
+}
+
+/* Precondiiton: l is the pidList specified to remove the pid value p from. */
+void removeFromPidList(struct pidList** l, pid_t p)
+{
+	struct pidNode* cur;
+	struct pidNode* deleteMe;
+
+	if (l == NULL)
+		return;
+
+	cur = (*l)->head;
+	if (cur == NULL)
+		return;
+
+	if (cur->pid == p) {
+		(*l)->head = cur->next;
+		kfree(cur); // kfree: frees kernel memory
+		(*l)->size = (*l)->size - 1;
+	}
+	/* Remove other occurences of p in the list. */
+	while (cur->next != NULL) {
+		if (cur->next->pid == p) {
+			deleteMe = cur->next;
+			cur->next = cur->next->next;
+			kfree(deleteMe);
+			(*l)->size = (*l)->size - 1;
+			return;
+		}
+		cur = cur->next;
+	}
+	/* Deallocate list if there are no more nodes. */
+	if ((*l)->size == 0) {
+		kfree(*l);
+		*l = NULL;
+	}
+}
+
+/* Precondiition: l is the pidList specified to see if the pid value p exits. 
+ * Postcondition: Returns 1 if p is in the list and 0 otherwise. */
+int isInPidList(struct pidList* l, pid_t p)
+{
+	struct pidNode* cur;
+	if (l == NULL)
+		return 0;
+	cur = l->head;
+	while (cur != NULL) {
+		if (cur->pid == p)
+			return 1;
+		cur = cur->next;
+	}
+	return 0;
+}
+
+/* Precondition: l is the ticketList to add to and t is the ticket to be added. */
+void addToTicketList(struct ticketList** l, unsigned t)
+{
+	struct ticketNode* newNode;
+	/* Just add a ticket node if the list is empty. */
+	if (*l == NULL) {
+		*l = kzalloc(sizeof(struct ticketList), GFP_ATOMIC);
+		(*l)->head = NULL;
+		(*l)->size = 0;
+	}
+	newNode = kzalloc(sizeof(struct ticketNode), GFP_ATOMIC);
+	newNode->ticket = t;
+	if ((*l)->head == NULL) {
+		(*l)->head = newNode;
+		newNode->next = NULL;
+	}
+	else {
+		newNode->next = (*l)->head;
+		(*l)->head = newNode;
+	}
+}
+
+/* Precondition: l is the ticketList specified to remove the ticket t from. */
+void removeFromTicketList(struct ticketList** l, unsigned t)
+{
+	struct ticketNode* cur;
+	struct ticketNode* deleteMe;
+
+	if (l == NULL)
+		return;
+
+	cur = (*l)->head;
+	if (cur == NULL)
+		return;
+
+	if (cur->ticket == t) {
+		(*l)->head = cur->next;
+		kfree(cur);
+		(*l)->size = (*l)->size - 1;
+	}
+	/* Remove other occurrences of t in the list. */
+	while (cur->next != NULL) {
+		if (cur->next->ticket == t) {
+			deleteMe = cur->next;
+			cur->next = cur->next->next;
+			kfree(deleteMe);
+			(*l)->size = (*l)->size - 1;
+			return;
+		}
+		cur = cur->next;
+	}
+	/* Deallocate list if there are no more nodes. */
+	if ((*l)->size == 0) {
+		kfree(*l);
+		*l = NULL;
+	}
+}
+
+/* Precondition: l is the ticketList specified to see if the ticket t exists. 
+ * Postcondition: Returns 1 if t is in the list and 0 otherwise. */
+int isInTicketList(struct ticketList* l, unsigned t)
+{
+	struct ticketNode* cur;
+	if (l == NULL)
+		return 0;
+	cur = l->head;
+	while (cur != NULL) {
+		if (cur->ticket == t)
+			return 1;
+		cur = cur->next;
+	}
+	return 0;
+}
 
 /*
  * file2osprd(filp)
