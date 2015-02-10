@@ -299,7 +299,6 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// Consider the 'req->sector', 'req->current_nr_sectors', and
 	// 'req->buffer' members, and the rq_data_dir() function.
 
-
 	// Your code here.
 	uint8_t* dPtr;
 	/* Get pointer to data on disk requested by the user.
@@ -313,16 +312,13 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	/* req->current_nr_sectors: number of sectors to rea/write to. */
 	if (reqType == READ) {
 		/* Copy contents of data buffer into request's buffer. */
-		unsigned long ret = copy_to_user ((void*) req->buffer, 
-			(void*) dPtr, req->current_nr_sectors * SECTOR_SIZE);
-		// FIXME: Return error somehow if ret != 0
+		memcpy((void*) req->buffer, (void*) dPtr,
+                        req->current_nr_sectors * SECTOR_SIZE);
 	}
 	else { // reqType == WRITE
 		/* Copy contents of request's buffer into data buffer. */
-		unsigned long ret = copy_from_user ((void*) dPtr, 
-			(void*) req->buffer, 
-			req->current_nr_sectors * SECTOR_SIZE);
-		// FIXME: Return error somehow if ret != 0
+		memcpy((void*) req->buffer, (void*) dPtr,
+                        req->current_nr_sectors * SECTOR_SIZE);
 	}
 	//eprintk("Should process request...\n");
 
