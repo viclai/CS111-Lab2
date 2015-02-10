@@ -317,7 +317,7 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	}
 	else { // reqType == WRITE
 		/* Copy contents of request's buffer into data buffer. */
-		memcpy((void*) req->buffer, (void*) dPtr,
+		memcpy((void*) dPtr, (void*) req->buffer,
                         req->current_nr_sectors * SECTOR_SIZE);
 	}
 	//eprintk("Should process request...\n");
