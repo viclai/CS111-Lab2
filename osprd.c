@@ -286,6 +286,9 @@ static void for_each_open_file(struct task_struct *task,
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
+	uint8_t* dPtr;
+	unsigned int reqType;
+
 	if (!blk_fs_request(req)) {
 		end_request(req, 0);
 		return;
@@ -300,12 +303,11 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	// 'req->buffer' members, and the rq_data_dir() function.
 
 	// Your code here.
-	uint8_t* dPtr;
+	
 	/* Get pointer to data on disk requested by the user.
 	 * req->sector: sector specified by the user to read/write to.
 	 * (req->sector * SECTOR_SIZE): offset */
 	dPtr = d->data + ((req->sector) * SECTOR_SIZE);
-	unsigned int reqType;
         /* Determine whether the request is a read or a write.
          * READ: 0, WRITE: 1 (defined in <linux/fs.h>) */
 	reqType = rq_data_dir(req);
@@ -320,7 +322,6 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 		memcpy((void*) dPtr, (void*) req->buffer,
                         req->current_nr_sectors * SECTOR_SIZE);
 	}
-	//eprintk("Should process request...\n");
 
 	end_request(req, 1);
 }
