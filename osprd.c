@@ -83,10 +83,10 @@ typedef struct osprd_info {
 
 	/* HINT: You may want to add additional fields to help
 	         in detecting deadlock. */
-	struct pidList* readLockingPids; // Maintain a list of processes that hold
+	struct pidList* readProcs;       // Maintain a list of processes that hold
 					 // a read lock
 
-	struct pidList* writeLockingPids;// Maintain a list of processes that hold
+	struct pidList* writeProcs;      // Maintain a list of processes that hold
 					 // a write lock
 
 	struct ticketList* exitedTickets;// Maintain a list of tickets that have 
@@ -132,7 +132,7 @@ void addToPidList(struct pidList** l, pid_t p)
 	(*l)->size = (*l)->size + 1;
 }
 
-/* Precondiiton: l is the pidList specified to remove the pid value p from. */
+/* Precondition: l is the pidList specified to remove the pid value p from. */
 void removeFromPidList(struct pidList** l, pid_t p)
 {
 	struct pidNode* cur;
@@ -168,7 +168,7 @@ void removeFromPidList(struct pidList** l, pid_t p)
 	}
 }
 
-/* Precondiition: l is the pidList specified to see if the pid value p exits. 
+/* Precondition: l is the pidList specified to see if the pid value p exits. 
  * Postcondition: Returns 1 if p is in the list and 0 otherwise. */
 int isInPidList(struct pidList* l, pid_t p)
 {
@@ -258,6 +258,20 @@ int isInTicketList(struct ticketList* l, unsigned t)
 	return 0;
 }
 
+/* Increment ticket_tail so that exited tickets are avoided. */
+void incrementTicket(osprd_info_t* d)
+{
+	d->ticket_tail = d->ticket_tail + 1;
+	while (1) {
+		if (!isInTicketList(d->exitedTickets, d->ticket_tail))
+			break; // The next process is alive (not exited).
+		else
+			removeFromTicketList(&(d->exitedTickets), 
+				d->ticket_tail);
+		d->ticket_tail = d->ticket_tail + 1;
+	}
+}
+
 /*
  * file2osprd(filp)
  *   Given an open file, check whether that file corresponds to an OSP ramdisk.
@@ -314,13 +328,13 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 	/* req->current_nr_sectors: number of sectors to rea/write to. */
 	if (reqType == READ) {
 		/* Copy contents of data buffer into request's buffer. */
-		memcpy((void*) req->buffer, (void*) dPtr,
-                        req->current_nr_sectors * SECTOR_SIZE);
+		memcpy((void*) req->buffer, (void*) dPtr, 
+			req->current_nr_sectors * SECTOR_SIZE);
 	}
 	else { // reqType == WRITE
 		/* Copy contents of request's buffer into data buffer. */
 		memcpy((void*) dPtr, (void*) req->buffer,
-                        req->current_nr_sectors * SECTOR_SIZE);
+			req->current_nr_sectors * SECTOR_SIZE);
 	}
 
 	end_request(req, 1);
@@ -356,6 +370,20 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		// This line avoids compiler warnings; you may remove it.
 		(void) filp_writable, (void) d;
 
+		if (d == NULL)
+			return 1;
+		osp_spin_lock(&(d->mutex));
+
+		if (isInPidList(d->writeProcs, current->pid))
+			removeFromPidList(&(d->writeProcs), current->pid);
+		if (isInPidList(d->readProcs, current->pid))
+			removeFromPidList(&(d->readProcs), current->pid);
+
+		if (d->readProcs == NULL && d->writeProcs == NULL)
+			filp->f_flags &= !F_OSPRD_LOCKED; // Clear lock
+
+		wake_up_all(&(d->blockq));
+		osp_spin_unlock(&(d->mutex));
 	}
 
 	return 0;
@@ -378,6 +406,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
+	unsigned curTicket;
 
 	// This line avoids compiler warnings; you may remove it.
 	(void) filp_writable, (void) d;
@@ -422,9 +451,92 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// be protected by a spinlock; which ones?)
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to acquire\n");
-		r = -ENOTTY;
+		if (filp_writable) { // Requested a write lock
 
+			osp_spin_lock(&(d->mutex));
+			/* Current process gets a ticket from ticket_head. */
+			curTicket = d->ticket_head;
+			d->ticket_head = d->ticket_head + 1;
+			osp_spin_unlock(&(d->mutex));
+			
+			/* In order to get the write lock, it must be the 
+			 * process's turn (so its ticket must match 
+			 * ticket_tail) and no other process can be reading or
+			 * writing. */
+			if (wait_event_interruptible(d->blockq, 
+				curTicket == d->ticket_tail &&
+				d->readProcs == NULL && 
+				d->writeProcs == NULL)) {
+				/* Conditions were not met so add to 
+				 * wait_queue_head_t with state marked as 
+				 * TASK_INTERRUPTIBLE. */
+			
+				if (d->ticket_tail == curTicket)
+					incrementTicket(d);
+				else
+					addToTicketList(&(d->exitedTickets),
+						curTicket);
+	
+				return -ERESTARTSYS;
+			}
+			
+			/* wait_event_interruptible returned 0 so the 
+			 * conditions were met! This means the process has the 
+			 * ticket to continue and no other process has a read 
+			 * or write lock.*/
+			osp_spin_lock(&(d->mutex));
+			filp->f_flags |= F_OSPRD_LOCKED; // Claim the lock
+			addToPidList(&(d->writeProcs), current->pid);
+			incrementTicket(d);
+
+			osp_spin_unlock(&(d->mutex));
+			/* Wake up all processes in the wait queue that were
+			 * put to sleep by wait_event_interruptible. */
+			wake_up_all(&(d->blockq));
+			return 0;
+		}
+		else { // Requested a read lock
+
+			osp_spin_lock(&(d->mutex));
+			/* Current process gets a ticket from ticket_head. */
+			curTicket = d->ticket_head;
+			d->ticket_head = d->ticket_head + 1;
+			osp_spin_unlock(&(d->mutex));
+
+			/* In order to get the read lock, it must be the 
+                         * process's turn (so its ticket must match 
+                         * ticket_tail) and no other process can be writing. */
+			if (wait_event_interruptible(d->blockq, 
+				curTicket == d->ticket_tail &&
+				d->writeProcs == NULL)) {
+				/* Conditions were not met so add to 
+                                 * wait_queue_head_t with state marked as 
+                                 * TASK_INTERRUPTIBLE. */
+				if (curTicket == d->ticket_tail)
+					incrementTicket(d);
+				else
+					addToTicketList(&(d->exitedTickets),
+						curTicket);
+
+				return -ERESTARTSYS;
+			}
+
+			/* wait_event_interruptible returned 0 so the 
+                         * conditions were met! This means the process has the 
+                         * ticket to continue and no other process has a write 
+                         * lock.*/
+			osp_spin_lock(&(d->mutex));
+			filp->f_flags |= F_OSPRD_LOCKED; // Claim the lock
+			addToPidList(&(d->readProcs), current->pid);
+			incrementTicket(d);
+
+			osp_spin_unlock(&(d->mutex));
+			/* Wake up all processes in the wait queue that were
+                         * put to sleep by wait_event_interruptible. */
+			wake_up_all(&(d->blockq));
+			r = 0;
+		}
+		
 	} else if (cmd == OSPRDIOCTRYACQUIRE) {
 
 		// EXERCISE: ATTEMPT to lock the ramdisk.
@@ -435,8 +547,35 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Otherwise, if we can grant the lock request, return 0.
 
 		// Your code here (instead of the next two lines).
-		eprintk("Attempting to try acquire\n");
-		r = -ENOTTY;
+		
+		/* Acquire the lock only if it's possible. */
+		if (d->writeProcs == NULL && 
+			(!filp_writable | (d->readProcs == NULL))) {
+			/* Acquired the lock successfully! */
+
+			osp_spin_lock(&(d->mutex));
+			/* Current process gets a ticket from ticket_head. */
+			curTicket = d->ticket_head;
+			d->ticket_head = d->ticket_head + 1;
+
+			if (filp_writable) { // Requested a write lock
+				
+				filp->f_flags |= F_OSPRD_LOCKED;
+				addToPidList(&(d->writeProcs), current->pid);
+				incrementTicket(d);
+			}
+			else { // Requested a read lock
+				filp->f_flags |= F_OSPRD_LOCKED;
+				addToPidList(&(d->readProcs), current->pid);
+				incrementTicket(d);
+			}
+
+			wake_up_all(&(d->blockq));
+			r = 0;
+			osp_spin_unlock(&(d->mutex));
+		}
+		else // Instead of blocking, mark as busy. 
+			r = -EBUSY;
 
 	} else if (cmd == OSPRDIOCRELEASE) {
 
@@ -448,7 +587,19 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// you need, and return 0.
 
 		// Your code here (instead of the next line).
-		r = -ENOTTY;
+		osp_spin_lock(&(d->mutex));
+		
+		if (isInPidList(d->writeProcs, current->pid))
+			removeFromPidList(&(d->writeProcs), current->pid);
+		if (isInPidList(d->readProcs, current->pid))
+			removeFromPidList(&(d->readProcs), current->pid);
+
+		if (d->readProcs == NULL && d->writeProcs == NULL)
+			filp->f_flags &= !F_OSPRD_LOCKED; // Clear the lock
+
+		wake_up_all(&(d->blockq));
+		r = 0;
+		osp_spin_unlock(&(d->mutex));
 
 	} else
 		r = -ENOTTY; /* unknown command */
@@ -465,6 +616,8 @@ static void osprd_setup(osprd_info_t *d)
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
 	/* Add code here if you add fields to osprd_info_t. */
+	d->readProcs = d->writeProcs = NULL;
+	d->exitedTickets = NULL;
 }
 
 
