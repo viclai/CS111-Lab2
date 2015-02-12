@@ -457,6 +457,15 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			/* Current process gets a ticket from ticket_head. */
 			curTicket = d->ticket_head;
 			d->ticket_head = d->ticket_head + 1;
+
+			/* DEADLOCK: Requesting same lock that the process 
+			 * already has. */
+			if (isInPidList(d->writeProcs, current->pid)) {
+				
+				osp_spin_unlock(&(d->mutex));
+				return -EDEADLK;
+			}
+
 			osp_spin_unlock(&(d->mutex));
 			
 			/* In order to get the write lock, it must be the 
@@ -501,6 +510,15 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			/* Current process gets a ticket from ticket_head. */
 			curTicket = d->ticket_head;
 			d->ticket_head = d->ticket_head + 1;
+
+			/* DEADLOCK: Requesting same lock that the process 
+                         * already has. */
+                        if (isInPidList(d->readProcs, current->pid)) {
+                                
+				osp_spin_unlock(&(d->mutex));
+                                return -EDEADLK;
+                        }
+
 			osp_spin_unlock(&(d->mutex));
 
 			/* In order to get the read lock, it must be the 
