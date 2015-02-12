@@ -14,9 +14,16 @@ close FOO;
 
     # Deadlock 2: Locking same device twice (for reads)
     [
-      'echo You dead bro | ./osprdaccess -w -l /dev/osprdb && ' .
+      'echo You dead bro | ./osprdaccess -w /dev/osprdb && ' .
       './osprdaccess -r 13 -l /dev/osprdb /dev/osprdb' ,
       "ioctl OSPRDIOCACQUIRE: Resource deadlock avoided"
+    ],
+
+    # Deadlock 3: Two processes writing to two different devices
+    [
+      '(echo U dead! | ./osprdaccess -w -l /dev/osprda /dev/osprdb)& ' .
+      '(echo RIP | ./osprdaccess -w -l /dev/osprdb /dev/osprda) ' ,
+      "ioctl OSPRDIOCACQUIRE: Resource deadlock avoided ioctl OSPRDIOCACQUIRE: Resource deadlock avoided"
     ],
 
     );

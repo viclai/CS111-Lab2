@@ -92,6 +92,10 @@ typedef struct osprd_info {
 	struct ticketList* exitedTickets;// Maintain a list of tickets that have 
 					 // exited
 
+	int isHoldingOtherLocks;	 // Tells if the device has another lock.
+					 // If so, there's a deadlock!
+					 // 1: has another lock, 0: no lock
+
 	// The following elements are used internally; you don't need
 	// to understand them.
 	struct request_queue *queue;    // The device request queue.
@@ -292,6 +296,18 @@ static void for_each_open_file(struct task_struct *task,
 						osprd_info_t *user_data),
 			       osprd_info_t *user_data);
 
+/* Pass this function into the second argument of for_each_open_file to see if
+ * the current process has any locks in other ramdisks. */
+void checkForOtherLocks(struct file *filp, osprd_info_t *data)
+{
+        osprd_info_t* dev = file2osprd(filp);
+        if (dev != NULL) {
+
+                if (isInPidList(dev->writeProcs, current->pid) ||
+                        isInPidList(dev->readProcs, current->pid))
+                        data->isHoldingOtherLocks = 1;
+        }
+}
 
 /*
  * osprd_process_request(d, req)
@@ -382,8 +398,8 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 		if (d->readProcs == NULL && d->writeProcs == NULL)
 			filp->f_flags &= !F_OSPRD_LOCKED; // Clear lock
 
-		wake_up_all(&(d->blockq));
 		osp_spin_unlock(&(d->mutex));
+		wake_up_all(&(d->blockq));
 	}
 
 	return 0;
@@ -459,11 +475,27 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			d->ticket_head = d->ticket_head + 1;
 
 			/* DEADLOCK: Requesting same lock that the process 
-			 * already has. */
-			if (isInPidList(d->writeProcs, current->pid)) {
-				
+			 * already has OR there is a process that is reading.
+			 */
+			if (isInPidList(d->writeProcs, current->pid) || 
+				isInPidList(d->readProcs, current->pid)) {
+			
+				wake_up_all(&(d->blockq));
+				d->isHoldingOtherLocks = 0;
+				incrementTicket(d);	
 				osp_spin_unlock(&(d->mutex));
 				return -EDEADLK;
+			}
+
+			/* DEADLOCK: Holding a lock in another device. */
+			for_each_open_file(current, checkForOtherLocks, d);
+			if (d->isHoldingOtherLocks) {
+
+				wake_up_all(&(d->blockq));
+                                d->isHoldingOtherLocks = 0;
+                                incrementTicket(d);
+                                osp_spin_unlock(&(d->mutex));
+                                return -EDEADLK;
 			}
 
 			osp_spin_unlock(&(d->mutex));
@@ -512,10 +544,26 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			d->ticket_head = d->ticket_head + 1;
 
 			/* DEADLOCK: Requesting same lock that the process 
-                         * already has. */
-                        if (isInPidList(d->readProcs, current->pid)) {
-                                
-				osp_spin_unlock(&(d->mutex));
+                         * already has OR there is a process that is writing.
+                         */
+                        if (isInPidList(d->readProcs, current->pid) ||
+                                isInPidList(d->writeProcs, current->pid)) {
+
+                                wake_up_all(&(d->blockq));
+                                d->isHoldingOtherLocks = 0;
+                                incrementTicket(d);
+                                osp_spin_unlock(&(d->mutex));
+                                return -EDEADLK;
+                        }
+
+                        /* DEADLOCK: Holding a lock in another device. */
+                        for_each_open_file(current, checkForOtherLocks, d);
+                        if (d->isHoldingOtherLocks) {
+
+                                wake_up_all(&(d->blockq));
+                                d->isHoldingOtherLocks = 0;
+                                incrementTicket(d);
+                                osp_spin_unlock(&(d->mutex));
                                 return -EDEADLK;
                         }
 
@@ -567,7 +615,9 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 		// Your code here (instead of the next two lines).
 		
 		/* Acquire the lock only if it's possible. */
-		if (d->writeProcs == NULL && 
+		for_each_open_file(current, checkForOtherLocks, d);
+
+		if (d->writeProcs == NULL && !d->isHoldingOtherLocks &&
 			(!filp_writable | (d->readProcs == NULL))) {
 			/* Acquired the lock successfully! */
 
@@ -583,6 +633,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 				incrementTicket(d);
 			}
 			else { // Requested a read lock
+
 				filp->f_flags |= F_OSPRD_LOCKED;
 				addToPidList(&(d->readProcs), current->pid);
 				incrementTicket(d);
@@ -636,6 +687,7 @@ static void osprd_setup(osprd_info_t *d)
 	/* Add code here if you add fields to osprd_info_t. */
 	d->readProcs = d->writeProcs = NULL;
 	d->exitedTickets = NULL;
+	d->isHoldingOtherLocks = 0;
 }
 
 
