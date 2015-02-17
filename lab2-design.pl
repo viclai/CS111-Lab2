@@ -19,19 +19,42 @@ close FOO;
     #              getting the notification.
     [
       'echo foo | ./osprdaccess -n -w 3 & ' .
-      'echo bobbar | ./osprdaccess -w 7; ' . 
-      './osprdaccess -r 7' ,
+      './osprdaccess -r 7 -l 5 & ' .
+      'echo bobbar | ./osprdaccess -w 7 -l ' , 
       "foobar"
     ],
 
     # Test case 3: The process requests for a notification of the third 
     #              fourth of the disk. When it gets the notification, it 
-    #              writes to the first fourth of the disk.
+    #              reads from the first fourth of the disk. 
     [
       './osprdaccess -r 7 -n 3 & ' .
       'echo gotcha | ./osprdaccess -w 7 && ' .
       'echo writing | ./osprdaccess -o 8192 -w 8' ,
       "gotcha"
+    ],
+
+    # Test case 4: The process requests a notification of the last fourth 
+    #              of the disk. When it gets the notification, it reads what 
+    #              was written. This test involves 2 processes acquiring the 
+    #              write lock. 
+    [
+      './osprdaccess -r 11 -o 12288 -n 4 /dev/osprdb & ' .
+      'echo "UCLA loses!" | ./osprdaccess -w 12 -l -o 12276 /dev/osprdb &' .
+      'echo "UCLA wins!" | ./osprdaccess -w 11 -o 12288 -d 5 -l /dev/osprdb' ,
+      "UCLA wins!"
+    ],
+
+    # Test case 5: The process requests a notification for the second fourth 
+    #              of the disk. When it gets the notification, it reads what 
+    #              was written. This test involves 2 processes trying to 
+    #              acquire the write lock. 
+    [
+      './osprdaccess -r 9 -o 4096 -n 2 /dev/osprdc & ' .
+      'echo whatever | ./osprdaccess -w 9 -o 4096 -L -d 3 /dev/osprdc &' .
+      'sleep 3 && ' .
+      'echo sure | ./osprdaccess -w 5 -o 4096 -L /dev/osprdc' ,
+      "ioctl OSPRDIOCTRYACQUIRE: Device or resource busy whatever"
     ],
 
     );
