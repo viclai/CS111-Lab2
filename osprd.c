@@ -44,8 +44,17 @@ MODULE_AUTHOR("Gloria Chan & Victor Lai");
 static int nsectors = 32;
 module_param(nsectors, int, 0);
 
+struct process {
+	struct task_struct* info;
+	int reqNotif;   // Tells if the process requested a notification. 
+			// 1: wants notification, 0: no notification
+	int sectors[4]; // Keeps track of which parts of the disk have been 
+			// written to. Disk is split into fourths. 
+			// 1: sector has been modified, 0: no change to sector
+};
+
 struct pidNode {
-	pid_t pid;
+	struct process* proc;
 	struct pidNode* next;
 };
 
@@ -96,6 +105,9 @@ typedef struct osprd_info {
 					 // If so, there's a deadlock!
 					 // 1: has another lock, 0: no lock
 
+	struct pidList* notifProcs;	 // Maintain a list of processes that 
+					 // requested a change notification
+
 	// The following elements are used internally; you don't need
 	// to understand them.
 	struct request_queue *queue;    // The device request queue.
@@ -110,8 +122,8 @@ static osprd_info_t osprds[NOSPRD];
 
 // Declare useful helper functions
 
-/* Precondition: l is the pidList specified to add the pid value p to. */
-void addToPidList(struct pidList** l, pid_t p)
+/* Precondition: l is the pidList specified to add the process p to. */
+void addToPidList(struct pidList** l, struct process* p)
 {
 	struct pidNode* newNode;
 	/* Just add a pid node if the list is empty. */
@@ -123,7 +135,7 @@ void addToPidList(struct pidList** l, pid_t p)
 		(*l)->size = 0;
 	}
 	newNode = kzalloc(sizeof(struct pidNode), GFP_ATOMIC);
-	newNode->pid = p;
+	newNode->proc = p;
 	/* Head of list always points to the new pid node. */
 	if ((*l)->head == NULL) {
 		(*l)->head = newNode;
@@ -149,16 +161,18 @@ void removeFromPidList(struct pidList** l, pid_t p)
 	if (cur == NULL)
 		return;
 
-	if (cur->pid == p) {
+	if (cur->proc->info->pid == p) {
 		(*l)->head = cur->next;
+		kfree(cur->proc);
 		kfree(cur); // kfree: frees kernel memory
 		(*l)->size = (*l)->size - 1;
 	}
 	/* Remove other occurences of p in the list. */
 	while (cur->next != NULL) {
-		if (cur->next->pid == p) {
+		if (cur->next->proc->info->pid == p) {
 			deleteMe = cur->next;
 			cur->next = cur->next->next;
+			kfree(deleteMe->proc);
 			kfree(deleteMe);
 			(*l)->size = (*l)->size - 1;
 			return;
@@ -173,19 +187,20 @@ void removeFromPidList(struct pidList** l, pid_t p)
 }
 
 /* Precondition: l is the pidList specified to see if the pid value p exits. 
- * Postcondition: Returns 1 if p is in the list and 0 otherwise. */
-int isInPidList(struct pidList* l, pid_t p)
+ * Postcondition: Returns the address of "struct process*" if p is in the list 
+ * and NULL otherwise. */
+struct process* isInPidList(struct pidList* l, pid_t p)
 {
 	struct pidNode* cur;
 	if (l == NULL)
-		return 0;
+		return NULL;
 	cur = l->head;
 	while (cur != NULL) {
-		if (cur->pid == p)
-			return 1;
+		if (cur->proc->info->pid == p)
+			return cur->proc;
 		cur = cur->next;
 	}
-	return 0;
+	return NULL;
 }
 
 /* Precondition: l is the ticketList to add to and t is the ticket to be added. */
@@ -302,7 +317,6 @@ void checkForOtherLocks(struct file *filp, osprd_info_t *data)
 {
         osprd_info_t* dev = file2osprd(filp);
         if (dev != NULL) {
-
                 if (isInPidList(dev->writeProcs, current->pid) ||
                         isInPidList(dev->readProcs, current->pid))
                         data->isHoldingOtherLocks = 1;
@@ -316,6 +330,7 @@ void checkForOtherLocks(struct file *filp, osprd_info_t *data)
  */
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
+	struct pidNode* cur;
 	uint8_t* dPtr;
 	unsigned int reqType;
 
@@ -341,7 +356,7 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
         /* Determine whether the request is a read or a write.
          * READ: 0, WRITE: 1 (defined in <linux/fs.h>) */
 	reqType = rq_data_dir(req);
-	/* req->current_nr_sectors: number of sectors to rea/write to. */
+	/* req->current_nr_sectors: number of sectors to read/write to. */
 	if (reqType == READ) {
 		/* Copy contents of data buffer into request's buffer. */
 		memcpy((void*) req->buffer, (void*) dPtr, 
@@ -351,6 +366,27 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 		/* Copy contents of request's buffer into data buffer. */
 		memcpy((void*) dPtr, (void*) req->buffer,
 			req->current_nr_sectors * SECTOR_SIZE);
+		/* Notify processes that requested change notifications. */
+		if (d->notifProcs != NULL) {
+			osp_spin_lock(&(d->mutex));
+			cur = d->notifProcs->head;
+			while (cur != NULL) {
+				cur->proc->reqNotif = 0;
+				/* Set the part(s) of the disk that were 
+				 * changed. */
+				if (req->sector == 0)
+					cur->proc->sectors[0] = 1;
+				if (req->sector == 8)
+					cur->proc->sectors[1] = 1;
+				if (req->sector == 16)
+					cur->proc->sectors[2] = 1;
+				if (req->sector == 24)
+					cur->proc->sectors[3] = 1;
+				cur = cur->next;
+			}
+			osp_spin_unlock(&(d->mutex));
+//			wake_up_all(&(d->blockq));
+		}
 	}
 
 	end_request(req, 1);
@@ -394,6 +430,8 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 			removeFromPidList(&(d->writeProcs), current->pid);
 		if (isInPidList(d->readProcs, current->pid))
 			removeFromPidList(&(d->readProcs), current->pid);
+		if (isInPidList(d->notifProcs, current->pid))
+			removeFromPidList(&(d->notifProcs), current->pid);
 
 		if (d->readProcs == NULL && d->writeProcs == NULL)
 			filp->f_flags &= !F_OSPRD_LOCKED; // Clear lock
@@ -423,13 +461,49 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	// is file open for writing?
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 	unsigned curTicket;
+	struct process* newProc;
+	unsigned long sector = 0; // User did not specify sector (for 
+				  // OSPRDIOCNOTIFY), so default is 1st sector
 
 	// This line avoids compiler warnings; you may remove it.
 	(void) filp_writable, (void) d;
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
-	if (cmd == OSPRDIOCACQUIRE) {
+	if (cmd == OSPRDIOCNOTIFY) {
+
+		newProc = kzalloc(sizeof(struct process), GFP_ATOMIC);
+		newProc->info = current;
+		newProc->reqNotif = 1;
+		addToPidList(&(d->notifProcs), newProc);
+
+		if (filp_writable) {
+
+                        if (arg != 0) // Assign sector that the user specified
+				sector = arg - 1;
+			/* Wait until another process has written to file. */
+                        if (wait_event_interruptible(d->blockq, 
+                                newProc->reqNotif == 0 && 
+                                newProc->sectors[sector] == 1)) {
+
+//				return -ERESTARTSYS;
+                        }
+			r = 0;
+		}
+		else { // Requested a read
+
+			if (arg != 0)
+				sector = arg - 1;
+			if (wait_event_interruptible(d->blockq, 
+				newProc->reqNotif == 0 &&
+				newProc->sectors[sector] == 1)) {
+                                
+//				return -ERESTARTSYS;
+                        }
+                        r = 0;
+		}
+
+	} else if (cmd == OSPRDIOCACQUIRE) {
 
 		// EXERCISE: Lock the ramdisk.
 		//
@@ -527,7 +601,11 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			 * or write lock.*/
 			osp_spin_lock(&(d->mutex));
 			filp->f_flags |= F_OSPRD_LOCKED; // Claim the lock
-			addToPidList(&(d->writeProcs), current->pid);
+
+			newProc = kzalloc(sizeof(struct process), GFP_ATOMIC);
+			newProc->info = current;
+			newProc->reqNotif = 0;
+			addToPidList(&(d->writeProcs), newProc);
 			incrementTicket(d);
 
 			osp_spin_unlock(&(d->mutex));
@@ -593,7 +671,11 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
                          * lock.*/
 			osp_spin_lock(&(d->mutex));
 			filp->f_flags |= F_OSPRD_LOCKED; // Claim the lock
-			addToPidList(&(d->readProcs), current->pid);
+
+			newProc = kzalloc(sizeof(struct process), GFP_ATOMIC);
+			newProc->info = current;
+			newProc->reqNotif = 0;
+			addToPidList(&(d->readProcs), newProc);
 			incrementTicket(d);
 
 			osp_spin_unlock(&(d->mutex));
@@ -629,13 +711,23 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			if (filp_writable) { // Requested a write lock
 				
 				filp->f_flags |= F_OSPRD_LOCKED;
-				addToPidList(&(d->writeProcs), current->pid);
+
+				newProc = kzalloc(sizeof(struct process),
+					GFP_ATOMIC);
+				newProc->info = current;
+				newProc->reqNotif = 0;
+				addToPidList(&(d->writeProcs), newProc);
 				incrementTicket(d);
 			}
 			else { // Requested a read lock
 
 				filp->f_flags |= F_OSPRD_LOCKED;
-				addToPidList(&(d->readProcs), current->pid);
+
+				newProc = kzalloc(sizeof(struct process),
+					GFP_ATOMIC);
+				newProc->info = current;
+				newProc->reqNotif = 0;
+				addToPidList(&(d->readProcs), newProc);
 				incrementTicket(d);
 			}
 
@@ -662,6 +754,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			removeFromPidList(&(d->writeProcs), current->pid);
 		if (isInPidList(d->readProcs, current->pid))
 			removeFromPidList(&(d->readProcs), current->pid);
+		if (isInPidList(d->notifProcs, current->pid))
+                        removeFromPidList(&(d->notifProcs), current->pid);
 
 		if (d->readProcs == NULL && d->writeProcs == NULL)
 			filp->f_flags &= !F_OSPRD_LOCKED; // Clear the lock
@@ -685,7 +779,7 @@ static void osprd_setup(osprd_info_t *d)
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
 	/* Add code here if you add fields to osprd_info_t. */
-	d->readProcs = d->writeProcs = NULL;
+	d->readProcs = d->writeProcs = d->notifProcs = NULL;
 	d->exitedTickets = NULL;
 	d->isHoldingOtherLocks = 0;
 }

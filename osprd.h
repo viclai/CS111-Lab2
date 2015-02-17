@@ -6,4 +6,6 @@
 #define OSPRDIOCTRYACQUIRE	43
 #define OSPRDIOCRELEASE		44
 
+#define OSPRDIOCNOTIFY		45
+
 #endif

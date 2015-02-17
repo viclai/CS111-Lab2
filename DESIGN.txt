@@ -1,17 +1,22 @@
 Design Problem: Change Notification 
 
-Preliminary Ideas: 
-  Edit the main function (in "osprdaccess.c") so that a notification option 
-    can be specified by the user (i.e. -n). 
-  When the user specifies the notification option, we must somehow let the 
-    kernel know that we're requesting notifications. For now, we can pass in 
-    the "O_APPEND" flag into the 3rd argument of the "open" system call. 
-  When "open" is called (in "osprdacess.c"), the code for the function 
-    "osprd_open" (in "osprd.c") will be executed. We can check that the option 
-    has been specified by looking to see if the flag has been set. 
-  One of the member variables in "struct inode" will be able to tell the 
-    process (that is requesting notifications) if the file opened has been 
-    written to. That member variable provides the "last modified time". We 
-    can just check to see if that time has changed. 
-  Use "wait_event_interruptible" to block and let others in the queue run. 
-  
+What It Does: 
+  A process can request a notification of a part of the disk being written 
+    to. The "-n" option does this. 
+  This option supports notifications for a fourth of the disk specified by 
+    the user. Since the disk has 32 sectors, the first fourth of the disk 
+    consists of the first 8 sectors, the second fourth of the disk consists of 
+    the next 8 sectors, and so on. For example, the command 
+    "./osprdaccess -r 4 -n 2 &" receives a notification when the second 
+    fourth of the disk has been written to. When it gets the notification, it 
+    reads the first four bytes of the disk. The default value is 1 (if the 
+    user doesn't specify a part of the disk). 
+  The processes requesting for a notification must be run in the background 
+    (or else it will hang). 
+
+What's the Point? 
+  This application can be related to a scoreboard (at a sporting event)! We 
+    read the new score when we get notified that the score has changed. A 
+    command like './osprdaccess -r 21 -n & echo "Bruins 46 Trojans 35" | 
+    ./osprdaccess -w 21' may be analogous to that example. Each fourth of the 
+    disk may possibly represent the score for a different game. 

@@ -29,6 +29,11 @@ Usage: ./osprdaccess -w [SIZE] [OPTIONS] [DEVICE...] < DATA\n\
        -l would block, -L will return a \"resource busy\" error instead.\n\
    -d DELAY\n\
        Wait DELAY seconds before reading/writing (but after locking).\n\
+   -n [SECTOR]\n\
+       Request a change notification.  SECTOR, if given, is the part of the\n\
+       disk to request a notification for.  For example, a value of 2 for\n\
+       SECTOR indicates the second fourth of the disk.  The value of SECTOR\n\
+       must be between 1 and 4, inclusive.\n\
    DEVICE is the device to read/write.  The default is /dev/osprda.\n\
    You can also give more than one device name.  All devices are opened, but\n\
    only the last device is read or written.\n");
@@ -136,8 +141,22 @@ int main(int argc, char *argv[])
 	double delay = 0;
 	double lock_delay = 0;
 	const char *devname = "/dev/osprda";
+	int notif = 0;
+	ssize_t sector = 1;
 
  flag:
+	// Detect a change notification option
+	if (argc >= 2 && strcmp(argv[1], "-n") == 0) {
+		notif = 1;
+		argv++, argc--;
+		if (argc >= 2 && parse_ssize(argv[1], &sector)) {
+			if (sector < 1 || sector > 4)
+				usage(1);
+			argv++, argc--;
+		}
+		goto flag;
+	}
+
 	// Detect a read/write option
 	if (argc >= 2 && strcmp(argv[1], "-r") == 0) {
 		mode = O_RDONLY;
@@ -211,6 +230,14 @@ int main(int argc, char *argv[])
 	if (devfd == -1) {
 		perror("open");
 		exit(1);
+	}
+
+	// Request change notification
+	if (notif) {
+		if (ioctl(devfd, OSPRDIOCNOTIFY, sector) == -1) {
+			perror("ioctl OSPRDIOCNOTIFY");
+			exit(1);
+		}
 	}
 
 	// Lock, possibly after delay
