@@ -40,7 +40,7 @@ close FOO;
     #              write lock. 
     [
       './osprdaccess -r 11 -o 1536 -n 4 /dev/osprdb & ' .
-      'echo "UCLA loses!" | ./osprdaccess -w 12 -l -o 1536 /dev/osprdb &' .
+      'echo "UCLA loses!" | ./osprdaccess -w 12 -l -o 1524 /dev/osprdb &' .
       'echo "UCLA wins!" | ./osprdaccess -w 11 -o 1536 -d 5 -l /dev/osprdb' ,
       "UCLA wins!"
     ],
