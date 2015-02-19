@@ -30,10 +30,9 @@ Usage: ./osprdaccess -w [SIZE] [OPTIONS] [DEVICE...] < DATA\n\
    -d DELAY\n\
        Wait DELAY seconds before reading/writing (but after locking).\n\
    -n [SECTOR]\n\
-       Request a change notification.  SECTOR, if given, is the part of the\n\
-       disk to request a notification for.  For example, a value of 2 for\n\
-       SECTOR indicates the second fourth of the disk.  The value of SECTOR\n\
-       must be between 1 and 4, inclusive.\n\
+       Request a change notification.  SECTOR, if given, is the sector of\n\
+       the disk to request a notification for.  The value of SECTOR must be\n\
+       between 1 and 32, inclusive.\n\
    DEVICE is the device to read/write.  The default is /dev/osprda.\n\
    You can also give more than one device name.  All devices are opened, but\n\
    only the last device is read or written.\n");
@@ -150,7 +149,7 @@ int main(int argc, char *argv[])
 		notif = 1;
 		argv++, argc--;
 		if (argc >= 2 && parse_ssize(argv[1], &sector)) {
-			if (sector < 1 || sector > 4)
+			if (sector < 1 || sector > 32)
 				usage(1);
 			argv++, argc--;
 		}
@@ -267,6 +266,9 @@ int main(int argc, char *argv[])
 	if (lseek(devfd, offset, SEEK_SET) == (off_t) -1) {
 		perror("lseek");
 		exit(1);
+	}
+	if ((mode & O_WRONLY) && !zero) {
+		ioctl(devfd, OSPRDIOCSECTOR, (unsigned long) offset);
 	}
 
 	// Read or write

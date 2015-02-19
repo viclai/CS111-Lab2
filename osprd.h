@@ -7,5 +7,6 @@
 #define OSPRDIOCRELEASE		44
 
 #define OSPRDIOCNOTIFY		45
+#define OSPRDIOCSECTOR		46
 
 #endif

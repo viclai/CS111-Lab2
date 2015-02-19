@@ -46,11 +46,12 @@ module_param(nsectors, int, 0);
 
 struct process {
 	struct task_struct* info;
-	int reqNotif;   // Tells if the process requested a notification. 
-			// 1: wants notification, 0: no notification
-	int sectors[4]; // Keeps track of which parts of the disk have been 
-			// written to. Disk is split into fourths. 
-			// 1: sector has been modified, 0: no change to sector
+	int reqNotif;    // Tells if the process requested a notification. 
+			 // 1: wants notification, 0: no notification
+	int sectors[32]; // Keeps track of which sectors of the disk have been 
+			 // written to. 
+			 // 1: sector has been modified, 0: no change to sector
+	unsigned sect;  // Only used if the process is writing 
 };
 
 struct pidNode {
@@ -92,21 +93,24 @@ typedef struct osprd_info {
 
 	/* HINT: You may want to add additional fields to help
 	         in detecting deadlock. */
-	struct pidList* readProcs;       // Maintain a list of processes that hold
-					 // a read lock
+	struct pidList* readProcs;       // Maintain a list of processes that 
+					 // hold a read lock
 
-	struct pidList* writeProcs;      // Maintain a list of processes that hold
-					 // a write lock
+	struct pidList* writeProcs;      // Maintain a list of processes that 
+					 // hold a write lock
 
-	struct ticketList* exitedTickets;// Maintain a list of tickets that have 
-					 // exited
+	struct ticketList* exitedTickets;// Maintain a list of tickets that 
+					 // have exited
 
-	int isHoldingOtherLocks;	 // Tells if the device has another lock.
-					 // If so, there's a deadlock!
-					 // 1: has another lock, 0: no lock
+	int isHoldingOtherLocks;	 // Tells if the device has another 
+					 // lock. If so, there's a deadlock! 
+					 // 1: has another lock, 0: no lock 
 
 	struct pidList* notifProcs;	 // Maintain a list of processes that 
 					 // requested a change notification
+
+	struct pidList* writeNlkProcs;	 // Maintain a list of processes that 
+					 // want to write with no lock. 
 
 	// The following elements are used internally; you don't need
 	// to understand them.
@@ -331,6 +335,7 @@ void checkForOtherLocks(struct file *filp, osprd_info_t *data)
 static void osprd_process_request(osprd_info_t *d, struct request *req)
 {
 	struct pidNode* cur;
+	struct process* p;
 	uint8_t* dPtr;
 	unsigned int reqType;
 
@@ -370,18 +375,14 @@ static void osprd_process_request(osprd_info_t *d, struct request *req)
 		if (d->notifProcs != NULL) {
 			osp_spin_lock(&(d->mutex));
 			cur = d->notifProcs->head;
+			p = isInPidList(d->writeProcs, current->pid);
+			if (p == NULL)
+				p = isInPidList(d->writeNlkProcs, current->pid);
 			while (cur != NULL) {
 				cur->proc->reqNotif = 0;
-				/* Set the part(s) of the disk that were 
+				/* Set the sector of the disk that was 
 				 * changed. */
-				if (req->sector == 0)
-					cur->proc->sectors[0] = 1;
-				if (req->sector == 8)
-					cur->proc->sectors[1] = 1;
-				if (req->sector == 16)
-					cur->proc->sectors[2] = 1;
-				if (req->sector == 24)
-					cur->proc->sectors[3] = 1;
+				cur->proc->sectors[p->sect] = 1;
 				cur = cur->next;
 			}
 			osp_spin_unlock(&(d->mutex));
@@ -432,6 +433,8 @@ static int osprd_close_last(struct inode *inode, struct file *filp)
 			removeFromPidList(&(d->readProcs), current->pid);
 		if (isInPidList(d->notifProcs, current->pid))
 			removeFromPidList(&(d->notifProcs), current->pid);
+		if (isInPidList(d->writeNlkProcs, current->pid))
+			removeFromPidList(&(d->writeNlkProcs), current->pid);
 
 		if (d->readProcs == NULL && d->writeProcs == NULL)
 			filp->f_flags &= !F_OSPRD_LOCKED; // Clear lock
@@ -462,6 +465,7 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 	int filp_writable = (filp->f_mode & FMODE_WRITE) != 0;
 	unsigned curTicket;
 	struct process* newProc;
+	struct process* tmp;
 	unsigned long sector = 0; // User did not specify sector (for 
 				  // OSPRDIOCNOTIFY), so default is 1st sector
 
@@ -470,7 +474,23 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 
 	// Set 'r' to the ioctl's return value: 0 on success, negative on error
 
-	if (cmd == OSPRDIOCNOTIFY) {
+	if (cmd == OSPRDIOCSECTOR) {
+		
+		if (d->notifProcs != NULL) {
+			tmp = isInPidList(d->writeProcs, current->pid);
+			if (tmp)
+				tmp->sect = ((ssize_t) arg) / SECTOR_SIZE;
+			else {
+				newProc = kzalloc(sizeof(struct process), 
+					GFP_ATOMIC);
+				newProc->info = current;
+				newProc->reqNotif = 0;
+				newProc->sect = ((ssize_t) arg) / SECTOR_SIZE;
+				addToPidList(&(d->writeNlkProcs), newProc);
+			}
+		}
+
+	} else if (cmd == OSPRDIOCNOTIFY) {
 
 		newProc = kzalloc(sizeof(struct process), GFP_ATOMIC);
 		newProc->info = current;
@@ -553,7 +573,6 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			 */
 			if (isInPidList(d->writeProcs, current->pid) || 
 				isInPidList(d->readProcs, current->pid)) {
-			
 				wake_up_all(&(d->blockq));
 				d->isHoldingOtherLocks = 0;
 				incrementTicket(d);	
@@ -756,6 +775,8 @@ int osprd_ioctl(struct inode *inode, struct file *filp,
 			removeFromPidList(&(d->readProcs), current->pid);
 		if (isInPidList(d->notifProcs, current->pid))
                         removeFromPidList(&(d->notifProcs), current->pid);
+		if (isInPidList(d->writeNlkProcs, current->pid))
+			removeFromPidList(&(d->writeNlkProcs), current->pid);
 
 		if (d->readProcs == NULL && d->writeProcs == NULL)
 			filp->f_flags &= !F_OSPRD_LOCKED; // Clear the lock
@@ -779,7 +800,7 @@ static void osprd_setup(osprd_info_t *d)
 	osp_spin_lock_init(&d->mutex);
 	d->ticket_head = d->ticket_tail = 0;
 	/* Add code here if you add fields to osprd_info_t. */
-	d->readProcs = d->writeProcs = d->notifProcs = NULL;
+	d->readProcs = d->writeProcs = d->notifProcs = d->writeNlkProcs = NULL;
 	d->exitedTickets = NULL;
 	d->isHoldingOtherLocks = 0;
 }
