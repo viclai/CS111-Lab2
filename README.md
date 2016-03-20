@@ -10,6 +10,6 @@ The code for this project is adopted from skeleton code provided by <a href="htt
 
 To compile and build this project, simply type the following in a Linux terminal:
 
-    make
+    ./run-qemu
 
 Make sure that QEMU is installed on your machine. 
