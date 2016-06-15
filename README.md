@@ -1,6 +1,6 @@
 # Synopsis
 
-RAM Disk is a course-related project assigned in an upper-division operating systems <a href="http://www.registrar.ucla.edu/schedule/subdet.aspx?srs=187336200&term=15W&session=" target="_blank" title="COM SCI 111">class</a> at UCLA. A RAM disk is built that supports read and write operations with locking.
+RAM Disk is a course-related project assigned in an upper-division operating systems <a href="http://web.cs.ucla.edu/classes/winter15/cs111/" target="_blank" title="COM SCI 111">class</a> at UCLA. A RAM disk is built that supports read and write operations with locking.
 
 # Development
 
